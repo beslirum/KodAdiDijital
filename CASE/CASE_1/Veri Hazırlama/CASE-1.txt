@@ -1,0 +1,90 @@
+﻿Görev, Veri Hazırlama: 
+* SQL ile: marka, model, yıl, km, fiyat, satış süresi gibi temel tabloları hazırlayın.
+* WINDOW fonksiyonlarıyla fiyatların bölge/marka bazlı dağılımını çıkarın.
+
+
+
+
+-- TEMEL ARAÇ BİLGİLERİ TABLOSU - Orijinal veriden temel bilgileri çıkarır
+CREATE TABLE temel_arac_bilgileri AS
+SELECT 
+   vin,
+   SUBSTRING(vin FROM 1 FOR 3) AS marka_kodu, -- VIN ilk 3 karakter marka kodu
+   SUBSTRING(vin FROM 10 FOR 1) AS model_yili_kodu, -- VIN 10. karakter model yılı kodu
+   city AS sehir,
+   dealer_zip AS posta_kodu,
+   body_type AS kasa_tipi,
+   engine_type AS motor_tipi,
+   fuel_type AS yakit_tipi,
+   exterior_color AS dis_renk,
+   interior_color AS ic_renk,
+   is_new AS yeni_mi,
+   is_certified AS sertifikali_mi,
+   has_accidents AS kazali_mi,
+   frame_damaged AS hasarli_mi,
+   listed_date AS ilan_tarihi,
+   daysonmarket AS piyasada_gun_sayisi,
+   price AS fiyat,
+   city_fuel_economy AS sehir_yakit_ekonomisi,
+   highway_fuel_economy AS otoyol_yakit_ekonomisi,
+   combine_fuel_economy AS kombine_yakit_ekonomisi
+FROM orijinal_arac_tablosu;
+
+-- MARKA-MODEL-YIL ÖZET TABLOSU - Grup bazlı istatistikler
+CREATE TABLE marka_model_yil_ozet AS
+SELECT 
+   marka_kodu,
+   model_yili_kodu,
+   kasa_tipi,
+   COUNT(*) AS toplam_arac_sayisi, -- Grup başına araç sayısı
+   AVG(fiyat) AS ortalama_fiyat, -- Ortalama fiyat
+   MIN(fiyat) AS en_dusuk_fiyat, -- Minimum fiyat
+   MAX(fiyat) AS en_yuksek_fiyat, -- Maksimum fiyat
+   AVG(piyasada_gun_sayisi) AS ortalama_gun_sayisi, -- Ortalama satış süresi
+   AVG(kombine_yakit_ekonomisi) AS ortalama_yakit_ekonomisi -- Ortalama yakıt ekonomisi
+FROM temel_arac_bilgileri
+WHERE fiyat IS NOT NULL -- NULL fiyatları filtrele
+GROUP BY marka_kodu, model_yili_kodu, kasa_tipi;
+
+-- BÖLGESEL SATIŞ PERFORMANSI - Şehir ve posta kodu bazlı analiz
+CREATE TABLE bolgesel_satis_performansi AS
+SELECT 
+   sehir,
+   posta_kodu,
+   COUNT(*) AS toplam_ilan_sayisi, -- Toplam ilan sayısı
+   AVG(fiyat) AS ortalama_fiyat, -- Ortalama fiyat
+   AVG(piyasada_gun_sayisi) AS ortalama_gun_sayisi, -- Ortalama satış süresi
+   COUNT(CASE WHEN yeni_mi THEN 1 END) AS yeni_arac_sayisi, -- Yeni araç sayısı
+   COUNT(CASE WHEN kazali_mi THEN 1 END) AS kazali_arac_sayisi -- Kazalı araç sayısı
+FROM temel_arac_bilgileri
+WHERE fiyat IS NOT NULL
+GROUP BY sehir, posta_kodu;
+
+-- MARKA FİYAT DAĞILIMI - Marka içi fiyat analizleri (Window fonksiyonları)
+CREATE TABLE marka_fiyat_dagilimi AS
+SELECT 
+   marka_kodu,
+   model_yili_kodu,
+   fiyat,
+   RANK() OVER (PARTITION BY marka_kodu ORDER BY fiyat DESC) AS marka_icinde_fiyat_siralamasi, -- Fiyat sıralaması
+   PERCENT_RANK() OVER (PARTITION BY marka_kodu ORDER BY fiyat) AS marka_icinde_fiyat_yuzdeligi, -- Yüzdelik dilim
+   AVG(fiyat) OVER (PARTITION BY marka_kodu) AS marka_ortalama_fiyati, -- Marka ortalaması
+   AVG(fiyat) OVER (PARTITION BY marka_kodu, model_yili_kodu) AS marka_model_yili_ortalamasi, -- Model yılı ortalaması
+   fiyat - AVG(fiyat) OVER (PARTITION BY marka_kodu) AS marka_ortalamasindan_farki -- Ortalamadan fark
+FROM temel_arac_bilgileri
+WHERE fiyat IS NOT NULL;
+
+-- BÖLGE FİYAT ANALİZİ - Bölgesel fiyat karşılaştırmaları
+CREATE TABLE bolge_fiyat_analizi AS
+SELECT 
+   sehir,
+   posta_kodu,
+   marka_kodu,
+   fiyat,
+   RANK() OVER (PARTITION BY sehir ORDER BY fiyat DESC) AS sehir_icinde_fiyat_siralamasi, -- Şehir içi sıralama
+   RANK() OVER (PARTITION BY posta_kodu ORDER BY fiyat DESC) AS postakodu_icinde_fiyat_siralamasi, -- Posta kodu içi sıralama
+   AVG(fiyat) OVER (PARTITION BY sehir) AS sehir_ortalama_fiyati, -- Şehir ortalaması
+   AVG(fiyat) OVER (PARTITION BY posta_kodu) AS postakodu_ortalama_fiyati, -- Posta kodu ortalaması
+   (fiyat / AVG(fiyat) OVER (PARTITION BY sehir) - 1) * 100 AS sehir_ortalamasina_yuzde_farki -- Ortalamaya yüzde fark
+FROM temel_arac_bilgileri
+WHERE fiyat IS NOT NULL;

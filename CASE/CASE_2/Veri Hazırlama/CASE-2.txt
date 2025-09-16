@@ -1,0 +1,139 @@
+﻿Görev, Veri Hazırlama: 
+* SQL ile stok devir süresini hesaplayın (CTE + WINDOW fonksiyonları). 
+* Satış süresi, fiyat değişiklikleri ve araç özelliklerini bir araya getirin. 
+
+
+
+
+-- STOK DEVİR SÜRESİ VE SATIŞ ANALİZLERİ
+
+WITH stok_devir_analizi AS (
+   SELECT 
+       vin,
+       marka_kodu,
+       model_yili_kodu,
+       kasa_tipi,
+       ilan_tarihi,
+       piyasada_gun_sayisi,
+       fiyat,
+       yeni_mi,
+       sertifikali_mi,
+       kazali_mi,
+       
+       -- Stok devir süresi analizleri
+       AVG(piyasada_gun_sayisi) OVER (PARTITION BY marka_kodu) AS marka_bazli_ortalama_stok_suresi,
+       AVG(piyasada_gun_sayisi) OVER (PARTITION BY marka_kodu, model_yili_kodu) AS marka_model_bazli_ortalama_stok_suresi,
+       PERCENT_RANK() OVER (PARTITION BY marka_kodu ORDER BY piyasada_gun_sayisi) AS stok_suresi_yuzdelik_dilim,
+       
+       -- Fiyat değişim analizleri
+       FIRST_VALUE(fiyat) OVER (PARTITION BY vin ORDER BY ilan_tarihi) AS ilk_ilan_fiyati,
+       LAST_VALUE(fiyat) OVER (PARTITION BY vin ORDER BY ilan_tarihi 
+                        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS son_ilan_fiyati,
+       fiyat - FIRST_VALUE(fiyat) OVER (PARTITION BY vin ORDER BY ilan_tarihi) AS fiyat_degisimi,
+       
+       -- Pazar karşılaştırmaları
+       fiyat - AVG(fiyat) OVER (PARTITION BY marka_kodu, model_yili_kodu) AS marka_model_ortalamasindan_fark,
+       fiyat / AVG(fiyat) OVER (PARTITION BY marka_kodu, model_yili_kodu) * 100 AS marka_model_ortalamasina_yuzde
+       
+   FROM temel_arac_bilgileri
+   WHERE fiyat IS NOT NULL AND ilan_tarihi IS NOT NULL
+),
+
+satis_performansi AS (
+   SELECT 
+       -- Temel bilgiler
+       s.vin,
+       s.marka_kodu,
+       s.model_yili_kodu,
+       s.kasa_tipi,
+       s.ilan_tarihi,
+       s.piyasada_gun_sayisi,
+       s.fiyat,
+       
+       -- Stok devir metrikleri
+       s.stok_suresi_yuzdelik_dilim,
+       CASE 
+           WHEN s.piyasada_gun_sayisi <= s.marka_bazli_ortalama_stok_suresi * 0.5 THEN 'Çok Hızlı'
+           WHEN s.piyasada_gun_sayisi <= s.marka_bazli_ortalama_stok_suresi * 0.8 THEN 'Hızlı'
+           WHEN s.piyasada_gun_sayisi <= s.marka_bazli_ortalama_stok_suresi * 1.2 THEN 'Normal'
+           WHEN s.piyasada_gun_sayisi <= s.marka_bazli_ortalama_stok_suresi * 1.5 THEN 'Yavaş'
+           ELSE 'Çok Yavaş'
+       END AS stok_devir_hizi,
+       
+       -- Fiyat performans metrikleri
+       s.fiyat_degisimi,
+       s.ilk_ilan_fiyati,
+       s.son_ilan_fiyati,
+       s.marka_model_ortalamasindan_fark,
+       s.marka_model_ortalamasina_yuzde,
+       
+       -- Araç özellikleri
+       a.yakit_tipi,
+       a.motor_tipi,
+       a.dis_renk,
+       a.yeni_mi,
+       a.sertifikali_mi,
+       a.kazali_mi,
+       
+       -- Segmentasyon
+       NTILE(4) OVER (ORDER BY s.fiyat) AS fiyat_segmenti,
+        -- NTILE(4), bir veri grubunu (partition) 4 eşit parçaya böler ve her satıra 1 ile 4 arasında bir grup numarası atar.
+ 
+       CASE 
+           WHEN s.piyasada_gun_sayisi < 7 THEN '0-7 gün'
+           WHEN s.piyasada_gun_sayisi < 30 THEN '7-30 gün'
+           WHEN s.piyasada_gun_sayisi < 90 THEN '30-90 gün'
+           ELSE '90+ gün'
+       END AS stok_suresi_grubu
+       
+   FROM stok_devir_analizi s
+   JOIN temel_arac_bilgileri a ON s.vin = a.vin
+)
+
+-- FİNAL ANALİTİK TABLOSU
+SELECT 
+   -- Kimlik bilgileri
+   vin,
+   marka_kodu,
+   model_yili_kodu,
+   kasa_tipi,
+   
+   -- Satış zamanlaması
+   ilan_tarihi,
+   piyasada_gun_sayisi AS stokta_kalma_suresi,
+   stok_devir_hizi,
+   stok_suresi_grubu,
+   
+   -- Fiyat bilgileri
+   fiyat AS son_fiyat,
+   ilk_ilan_fiyati,
+   son_ilan_fiyati,
+   fiyat_degisimi,
+   marka_model_ortalamasindan_fark,
+   marka_model_ortalamasina_yuzde,
+   
+   -- Araç özellikleri
+   yakit_tipi,
+   motor_tipi,
+   dis_renk,
+   yeni_mi,
+   sertifikali_mi,
+   kazali_mi,
+   
+   -- Segmentler
+   fiyat_segmenti,
+   
+   -- Performans metrikleri
+   CASE 
+       WHEN fiyat_degisimi < 0 AND stok_devir_hizi IN ('Çok Hızlı', 'Hızlı') THEN 'Başarılı İndirim'
+       WHEN fiyat_degisimi < 0 AND stok_devir_hizi IN ('Yavaş', 'Çok Yavaş') THEN 'Geç İndirim'
+       WHEN fiyat_degisimi >= 0 AND stok_devir_hizi IN ('Çok Hızlı', 'Hızlı') THEN 'Premium Başarı'
+       ELSE 'İyileştirme Gerekli'
+   END AS satis_strateji_etiketi,
+   
+   -- Stok devir verimlilik skoru
+   ROUND((100 - stok_suresi_yuzdelik_dilim * 100) * 
+         (CASE WHEN fiyat_degisimi >= 0 THEN 1.2 ELSE 0.8 END), 2) AS verimlilik_skoru
+       
+FROM satis_performansi
+ORDER BY stokta_kalma_suresi, verimlilik_skoru DESC;
